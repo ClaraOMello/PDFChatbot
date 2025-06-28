@@ -3,125 +3,180 @@ import streamlit as st
 import base64
 import uuid
 import os
+import PyPDF2
+import cohere
 from datetime import datetime
+from dotenv import load_dotenv
 
-# Configuração da página
+load_dotenv()
+
 st.set_page_config(
     page_title="PDF Chatbot",
     page_icon="💬",
     layout="wide"
 )
 
-# Função para salvar o PDF temporariamente
+
+@st.cache_resource
+def load_cohere_client():
+    api_key = os.getenv("COHERE_API_KEY", "")
+    if not api_key:
+        st.error(
+            "API Key do Cohere não encontrada. Configure a variável de ambiente COHERE_API_KEY.")
+        return None
+    try:
+        return cohere.Client(api_key)
+    except Exception as e:
+        st.error(f"Erro ao inicializar o cliente Cohere: {e}")
+        return None
+
+
+def extract_text_from_pdf(file_path):
+    text = ""
+    try:
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page_num in range(len(pdf_reader.pages)):
+                text += pdf_reader.pages[page_num].extract_text() + "\n"
+    except Exception as e:
+        st.error(f"Erro ao extrair texto do PDF: {e}")
+    return text
+
+
+def generate_response(question, pdf_text, co_client):
+    if co_client is None:
+        return "Erro: Cliente Cohere não inicializado. Verifique sua API key."
+
+    if not pdf_text or len(pdf_text.strip()) == 0:
+        return "Não há texto no documento para analisar."
+
+    max_context_length = 4000
+    context = pdf_text[:max_context_length] if len(
+        pdf_text) > max_context_length else pdf_text
+
+    prompt = f"""
+        Documento:
+        {context}
+        
+        Pergunta: {question}
+        
+        Responda à pergunta acima com base apenas nas informações contidas no documento. Se a resposta não estiver no documento, diga "Não encontrei essa informação no documento."
+        
+        Resposta:
+    """
+
+    try:
+        response = co_client.generate(
+            model='command',
+            prompt=prompt,
+            max_tokens=300,
+            temperature=0.2,
+            k=0,
+            stop_sequences=["Documento:", "Pergunta:"],
+            return_likelihoods='NONE'
+        )
+        generated_text = response.generations[0].text.strip()
+        return generated_text
+
+    except Exception as e:
+        st.error(f"Erro ao gerar resposta: {e}")
+        return f"Desculpe, ocorreu um erro ao processar sua pergunta: {str(e)}"
 
 
 def save_uploaded_file(uploaded_file):
-    # Criar diretório temporário se não existir
     if not os.path.exists("temp"):
         os.makedirs("temp")
-
-    # Gerar nome de arquivo único
     file_path = os.path.join("temp", f"{str(uuid.uuid4())}.pdf")
-
-    # Salvar o arquivo
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
-
     return file_path
-
-# Função para exibir o PDF
 
 
 def display_pdf(file_path):
-    # Abrir e ler o arquivo PDF
     with open(file_path, "rb") as f:
         base64_pdf = base64.b64encode(f.read()).decode('utf-8')
 
-    # Exibir o PDF usando um iframe
     pdf_display = f"""
-    <iframe
-        src="data:application/pdf;base64,{base64_pdf}"
-        width="100%"
-        height="500"
-        type="application/pdf"
-    >
-    </iframe>
-"""
+        <iframe
+            src="data:application/pdf;base64,{base64_pdf}"
+            width="100%"
+            height="500"
+            type="application/pdf"
+        >
+        </iframe>
+    """
     st.markdown(pdf_display, unsafe_allow_html=True)
 
 
-# Inicializar o estado da sessão
 if 'pdf_uploaded' not in st.session_state:
     st.session_state.pdf_uploaded = False
 
 if 'pdf_path' not in st.session_state:
     st.session_state.pdf_path = None
 
+if 'pdf_text' not in st.session_state:
+    st.session_state.pdf_text = ""
+
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 
-# Adicionar variável para controlar o envio de mensagens
-if 'message_sent' not in st.session_state:
-    st.session_state.message_sent = False
+if 'model_loaded' not in st.session_state:
+    st.session_state.model_loaded = False
 
-# Função para processar o envio de mensagem
+if 'debug_mode' not in st.session_state:
+    st.session_state.debug_mode = False
+
+if 'submit_question' not in st.session_state:
+    st.session_state.submit_question = False
+
+with st.spinner("Inicializando o modelo de IA..."):
+    co_client = load_cohere_client()
+    st.session_state.model_loaded = co_client is not None
 
 
 def process_message():
-    user_message = st.session_state.user_input
-    if user_message:
-        # Adicionar mensagem do usuário ao histórico
-        st.session_state.chat_history.append(
-            {"role": "user", "content": user_message})
-
-        # Gerar resposta do bot (repetindo o que o usuário disse)
-        bot_response = f'Você disse: "{user_message}"'
-
-        # Adicionar resposta do bot ao histórico
-        st.session_state.chat_history.append(
-            {"role": "assistant", "content": bot_response})
-
-        # Limpar o input definindo a variável de estado
-        st.session_state.user_input = ""
+    st.session_state.submit_question = True
 
 
-# Título do aplicativo
 st.title("📄 PDF Chatbot")
 
-# Layout com duas colunas
 col1, col2 = st.columns([1, 2])
 
 with col1:
     st.header("Upload de Documento")
-
-    # Widget de upload de arquivo
     uploaded_file = st.file_uploader(
         "Faça upload de um PDF para começar a conversa", type="pdf")
 
     if uploaded_file is not None and not st.session_state.pdf_uploaded:
-        # Salvar o arquivo
-        file_path = save_uploaded_file(uploaded_file)
-        st.session_state.pdf_path = file_path
-        st.session_state.pdf_uploaded = True
-        st.success("PDF carregado com sucesso!")
+        with st.spinner("Processando o PDF..."):
+            file_path = save_uploaded_file(uploaded_file)
+            st.session_state.pdf_path = file_path
 
-        # Adicionar mensagem de boas-vindas ao histórico
-        welcome_msg = "Olá! Estou pronto para conversar sobre o documento que você enviou. O que gostaria de saber?"
-        st.session_state.chat_history.append(
-            {"role": "assistant", "content": welcome_msg})
+            pdf_text = extract_text_from_pdf(file_path)
+            st.session_state.pdf_text = pdf_text
 
-    # Exibir o PDF se estiver carregado
+            if pdf_text.strip():
+                st.session_state.pdf_uploaded = True
+                st.success("PDF carregado e processado com sucesso!")
+
+                welcome_msg = "Olá! Analisei seu documento e estou pronto para responder perguntas sobre ele. O que gostaria de saber?"
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": welcome_msg})
+            else:
+                st.error(
+                    "Não foi possível extrair texto do PDF. Verifique se o documento não está protegido ou se é um PDF escaneado.")
+
     if st.session_state.pdf_uploaded:
         st.subheader("Documento Carregado")
         display_pdf(st.session_state.pdf_path)
 
-        # Botão para reiniciar
         if st.button("Carregar outro documento"):
             # Limpar o estado da sessão
             if st.session_state.pdf_path and os.path.exists(st.session_state.pdf_path):
                 os.remove(st.session_state.pdf_path)
             st.session_state.pdf_uploaded = False
             st.session_state.pdf_path = None
+            st.session_state.pdf_text = ""
             st.session_state.chat_history = []
             st.rerun()
 
@@ -130,12 +185,18 @@ with col2:
 
     # Container para o histórico de chat
     chat_container = st.container()
+    chat_container.markdown("""
+        <style>
+            .chat-container {
+                height: 400px;
+                overflow-y: auto;
+                padding-right: 15px;
+            }
+        </style>
+    """, unsafe_allow_html=True)
 
-    # Área de entrada de mensagem
-    message_container = st.container()
-
-    # Exibir o histórico de chat
     with chat_container:
+        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
         for message in st.session_state.chat_history:
             if message["role"] == "user":
                 st.markdown(f"""
@@ -153,29 +214,109 @@ with col2:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # Entrada de mensagem
+    message_container = st.container()
     with message_container:
         if st.session_state.pdf_uploaded:
-            # Usar o callback on_change para processar a mensagem
-            st.text_input(
-                "Digite sua mensagem:",
-                key="user_input",
-                on_change=process_message
-            )
+            with st.form(key="question_form", clear_on_submit=True):
+                user_input = st.text_input(
+                    "Digite sua pergunta sobre o documento:", key="user_input")
+                submit_button = st.form_submit_button(
+                    "Enviar", on_click=process_message)
 
-            # Adicionar um botão de envio como alternativa
-            if st.button("Enviar"):
-                process_message()
+            if st.session_state.submit_question and user_input:
+                st.session_state.chat_history.append(
+                    {"role": "user", "content": user_input})
+
+                with st.spinner("Gerando resposta..."):
+                    bot_response = generate_response(
+                        user_input, st.session_state.pdf_text, co_client)
+
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": bot_response})
+
+                st.session_state.submit_question = False
+
+                st.rerun()
         else:
             st.info("Por favor, faça upload de um PDF para iniciar a conversa.")
 
-# Rodapé
+with st.sidebar:
+    st.title("Configurações")
+
+    st.session_state.debug_mode = st.checkbox(
+        "Modo Debug", value=st.session_state.debug_mode)
+
+    if st.session_state.debug_mode:
+        st.subheader("Informações de Debug")
+
+        st.write("Modelo carregado:", st.session_state.model_loaded)
+        st.write("PDF carregado:", st.session_state.pdf_uploaded)
+
+        if st.button("Testar modelo com texto simples"):
+            test_text = "O céu é azul durante o dia e escuro à noite. As estrelas são visíveis apenas à noite quando o céu está escuro."
+            test_question = "Quando as estrelas são visíveis?"
+
+            with st.spinner("Testando modelo..."):
+                try:
+                    response = generate_response(
+                        test_question, test_text, co_client)
+                    st.success(f"Pergunta: {test_question}")
+                    st.success(f"Resposta: {response}")
+                except Exception as e:
+                    st.error(f"Erro ao testar modelo: {str(e)}")
+
+        if st.session_state.pdf_uploaded:
+            if st.button("Ver texto extraído do PDF"):
+                st.text_area("Texto do PDF", st.session_state.pdf_text[:5000] + "..." if len(
+                    st.session_state.pdf_text) > 5000 else st.session_state.pdf_text, height=200)
+
+            if st.button("Ver histórico de chat"):
+                st.json(st.session_state.chat_history)
+
+            st.subheader("Configurações do Modelo")
+            model_options = ["command", "command-light", "command-nightly"]
+            selected_model = st.selectbox(
+                "Modelo Cohere", model_options, index=0)
+
+            temperature = st.slider(
+                "Temperatura", min_value=0.0, max_value=1.0, value=0.2, step=0.1)
+
+            if st.button("Testar configurações"):
+                test_question = "Do que trata este documento?"
+                with st.spinner("Testando configurações..."):
+                    try:
+                        prompt = f"""
+                       Documento:
+                       {st.session_state.pdf_text[:1000]}
+                       
+                       Pergunta: {test_question}
+                       
+                       Responda à pergunta acima com base apenas nas informações contidas no documento.
+                       
+                       Resposta:
+                       """
+
+                        response = co_client.generate(
+                            model=selected_model,
+                            prompt=prompt,
+                            max_tokens=300,
+                            temperature=temperature,
+                            k=0,
+                            stop_sequences=["Documento:", "Pergunta:"],
+                            return_likelihoods='NONE'
+                        )
+
+                        st.success(f"Pergunta: {test_question}")
+                        st.success(
+                            f"Resposta: {response.generations[0].text.strip()}")
+                    except Exception as e:
+                        st.error(f"Erro ao testar configurações: {str(e)}")
+
 st.markdown("---")
 st.markdown(
     f"© {datetime.now().year} PDF Chatbot App | Desenvolvido com Streamlit")
-
-# Limpar arquivos temporários ao fechar o aplicativo
 
 
 def cleanup():
@@ -185,5 +326,4 @@ def cleanup():
         os.rmdir("temp")
 
 
-# Registrar função de limpeza
 atexit.register(cleanup)
