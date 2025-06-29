@@ -84,28 +84,17 @@ def generate_response(question, pdf_text, co_client):
 
 
 def save_uploaded_file(uploaded_file):
+    if 'pdf_path' in st.session_state and st.session_state.pdf_path and os.path.exists(st.session_state.pdf_path):
+        try:
+            os.remove(st.session_state.pdf_path)
+        except:
+            pass
     if not os.path.exists("temp"):
         os.makedirs("temp")
     file_path = os.path.join("temp", f"{str(uuid.uuid4())}.pdf")
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     return file_path
-
-
-def display_pdf(file_path):
-    with open(file_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-
-    pdf_display = f"""
-        <iframe
-            src="data:application/pdf;base64,{base64_pdf}"
-            width="100%"
-            height="500"
-            type="application/pdf"
-        >
-        </iframe>
-    """
-    st.markdown(pdf_display, unsafe_allow_html=True)
 
 
 if 'pdf_uploaded' not in st.session_state:
@@ -129,6 +118,9 @@ if 'debug_mode' not in st.session_state:
 if 'submit_question' not in st.session_state:
     st.session_state.submit_question = False
 
+if 'last_uploaded_file' not in st.session_state:
+    st.session_state.last_uploaded_file = None
+
 with st.spinner("Inicializando o modelo de IA..."):
     co_client = load_cohere_client()
     st.session_state.model_loaded = co_client is not None
@@ -147,74 +139,90 @@ with col1:
     uploaded_file = st.file_uploader(
         "Faça upload de um PDF para começar a conversa", type="pdf")
 
-    if uploaded_file is not None and not st.session_state.pdf_uploaded:
-        with st.spinner("Processando o PDF..."):
-            file_path = save_uploaded_file(uploaded_file)
-            st.session_state.pdf_path = file_path
+    if uploaded_file is not None:
+        is_new_file = (st.session_state.last_uploaded_file !=
+                       uploaded_file.name)
 
-            pdf_text = extract_text_from_pdf(file_path)
-            st.session_state.pdf_text = pdf_text
+        if is_new_file:
+            st.session_state.last_uploaded_file = uploaded_file.name
 
-            if pdf_text.strip():
-                st.session_state.pdf_uploaded = True
-                st.success("PDF carregado e processado com sucesso!")
+            with st.spinner("Processando o PDF..."):
+                file_path = save_uploaded_file(uploaded_file)
+                st.session_state.pdf_path = file_path
 
-                welcome_msg = "Olá! Analisei seu documento e estou pronto para responder perguntas sobre ele. O que gostaria de saber?"
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": welcome_msg})
-            else:
-                st.error(
-                    "Não foi possível extrair texto do PDF. Verifique se o documento não está protegido ou se é um PDF escaneado.")
+                pdf_text = extract_text_from_pdf(file_path)
+                st.session_state.pdf_text = pdf_text
 
-    if st.session_state.pdf_uploaded:
-        st.subheader("Documento Carregado")
-        display_pdf(st.session_state.pdf_path)
+                if pdf_text.strip():
+                    if st.session_state.pdf_uploaded:
+                        st.session_state.chat_history = []
 
-        if st.button("Carregar outro documento"):
-            # Limpar o estado da sessão
-            if st.session_state.pdf_path and os.path.exists(st.session_state.pdf_path):
-                os.remove(st.session_state.pdf_path)
-            st.session_state.pdf_uploaded = False
-            st.session_state.pdf_path = None
-            st.session_state.pdf_text = ""
-            st.session_state.chat_history = []
-            st.rerun()
+                    st.session_state.pdf_uploaded = True
+                    st.success("PDF carregado e processado com sucesso!")
+
+                    welcome_msg = "Olá! Analisei seu documento e estou pronto para responder perguntas sobre ele. O que gostaria de saber?"
+                    st.session_state.chat_history.append(
+                        {"role": "assistant", "content": welcome_msg})
+
+                    st.rerun()
+                else:
+                    st.error(
+                        "Não foi possível extrair texto do PDF. Verifique se o documento não está protegido ou se é um PDF escaneado.")
 
 with col2:
     st.header("Chat")
 
-    # Container para o histórico de chat
-    chat_container = st.container()
-    chat_container.markdown("""
+    st.markdown("""
         <style>
-            .chat-container {
-                height: 400px;
-                overflow-y: auto;
-                padding-right: 15px;
+            .chat-message {
+                padding: 10px 15px;
+                border-radius: 20px;
+                margin-bottom: 10px;
+                display: inline-block;
+                max-width: 70%;
+                word-wrap: break-word;
+            }
+            
+            .user-message {
+                background-color: #0084ff;
+                color: white;
+                border-bottom-right-radius: 5px;
+                float: right;
+                clear: both;
+            }
+            
+            .assistant-message {
+                background-color: #e5e5ea;
+                color: black;
+                border-bottom-left-radius: 5px;
+                float: left;
+                clear: both;
+            }
+            
+            /* Limpar os floats após cada mensagem */
+            .clearfix::after {
+                content: "";
+                clear: both;
+                display: table;
             }
         </style>
     """, unsafe_allow_html=True)
 
-    with chat_container:
-        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-        for message in st.session_state.chat_history:
-            if message["role"] == "user":
-                st.markdown(f"""
-            <div style="display: flex; justify-content: flex-end;">
-                <div style="background-color: #0084ff; color: white; border-radius: 20px; padding: 10px 15px; margin: 5px 0; max-width: 70%;">
-                    {message["content"]}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-            <div style="display: flex; justify-content: flex-start;">
-                <div style="background-color: #e5e5ea; color: black; border-radius: 20px; padding: 10px 15px; margin: 5px 0; max-width: 70%;">
-                    {message["content"]}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+    chat_container = st.container()
+
+    for message in st.session_state.chat_history:
+        if message["role"] == "user":
+            chat_container.markdown(
+                f'<div class="clearfix"><div class="chat-message user-message">{message["content"]}</div></div>',
+                unsafe_allow_html=True
+            )
+        else:
+            chat_container.markdown(
+                f'<div class="clearfix"><div class="chat-message assistant-message">{message["content"]}</div></div>',
+                unsafe_allow_html=True
+            )
+
+    chat_container.markdown('</div>', unsafe_allow_html=True)
 
     message_container = st.container()
     with message_container:
@@ -254,6 +262,9 @@ with st.sidebar:
         st.write("Modelo carregado:", st.session_state.model_loaded)
         st.write("PDF carregado:", st.session_state.pdf_uploaded)
 
+        if st.session_state.pdf_uploaded:
+            st.write("Nome do arquivo:", st.session_state.last_uploaded_file)
+
         if st.button("Testar modelo com texto simples"):
             test_text = "O céu é azul durante o dia e escuro à noite. As estrelas são visíveis apenas à noite quando o céu está escuro."
             test_question = "Quando as estrelas são visíveis?"
@@ -275,6 +286,13 @@ with st.sidebar:
             if st.button("Ver histórico de chat"):
                 st.json(st.session_state.chat_history)
 
+            if st.button("Limpar histórico de chat"):
+                welcome_msg = "Olá! Analisei seu documento e estou pronto para responder perguntas sobre ele. O que gostaria de saber?"
+                st.session_state.chat_history = [
+                    {"role": "assistant", "content": welcome_msg}]
+                st.success("Histórico de chat limpo!")
+                st.rerun()
+
             st.subheader("Configurações do Modelo")
             model_options = ["command", "command-light", "command-nightly"]
             selected_model = st.selectbox(
@@ -288,15 +306,15 @@ with st.sidebar:
                 with st.spinner("Testando configurações..."):
                     try:
                         prompt = f"""
-                       Documento:
-                       {st.session_state.pdf_text[:1000]}
-                       
-                       Pergunta: {test_question}
-                       
-                       Responda à pergunta acima com base apenas nas informações contidas no documento.
-                       
-                       Resposta:
-                       """
+                    Documento:
+                    {st.session_state.pdf_text[:1000]}
+                    
+                    Pergunta: {test_question}
+                    
+                    Responda à pergunta acima com base apenas nas informações contidas no documento.
+                    
+                    Resposta:
+                    """
 
                         response = co_client.generate(
                             model=selected_model,
